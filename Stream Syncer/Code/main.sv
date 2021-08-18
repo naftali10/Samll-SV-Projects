@@ -9,11 +9,11 @@ module Stream_syncer(
   input clk,
   input reset,
   input logic stream,
-  output logic [7:0] data_out,
+  output logic [`OUT_SZ-1:0] data_out,
   output logic data_valid,
   output logic in_frame
   );
-  // Shift register
+  // Pattern shift register
   logic [`SR_SZ-1:0] SR;
   int i;
   always_ff @(posedge clk) begin
@@ -24,16 +24,26 @@ module Stream_syncer(
       SR[0] <= stream;
     end
   end
+  // Data shift register
+  int j;
+  always_ff @(posedge clk) begin
+    if (reset) data_out <= 0;
+    else begin
+      for(j=`OUT_SZ-1; j>0; j--)
+        data_out[j] <= data_out[j-1];
+      data_out[0] <= stream;
+    end
+  end
   // Comparator
-  assign is_pattren = SR==`PATTERN;
+  logic is_pattern;
+  assign is_pattern = SR==`PATTERN;
   // Counter
   logic [$clog2(`WINDOW_SZ)-1:0] counter;
   logic reset_cntr;
   always_ff @(posedge clk) begin
     if (reset | reset_cntr) counter <= 0;
-    else begin
-      counter <= counter + 1'b1;
-    end
+    else if (counter>=`WINDOW_SZ-1) counter <= 0;
+    	else counter <= counter + 1'b1;
   end
   // Controller
   enum logic [1:0] {no_sync = 2'b00,
@@ -50,20 +60,54 @@ module Stream_syncer(
       no_sync: begin
         data_valid = 0;
         in_frame = 0;
-        if (is_pattren) next = ptrn1;
+        reset_cntr = 0;
+        if (is_pattern) begin
+          next = ptrn1;
+          reset_cntr = 1;
+        end
       end
       ptrn1: begin
         data_valid = 0;
         in_frame = 0;
-        if (is_pattren) next = ptrn2;
+        reset_cntr = 0;
+        if (~is_pattern && counter==`WINDOW_SZ-1) next = no_sync; // Pattern is missing
+        else begin
+          if (is_pattern && counter==`WINDOW_SZ-1) next = ptrn2;
+          else if (is_pattern && counter!=`WINDOW_SZ-1) begin
+            next = ptrn1;
+            reset_cntr = 1;
+          end
+        end
       end
       ptrn2:begin
         data_valid = 0;
         in_frame = 0;
+        reset_cntr = 0;
+        if (~is_pattern && counter==`WINDOW_SZ-1) next = no_sync; // Pattern is missing
+        else begin
+          if (is_pattern && counter==`WINDOW_SZ-1) next = in_sync;
+          else if (is_pattern && counter!=`WINDOW_SZ-1) begin
+            next = ptrn1;
+            reset_cntr = 1;
+          end
+        end
       end
       in_sync:begin
         data_valid = 0;
-        in_frame = 0;
+        in_frame = 1;
+        reset_cntr = 0;
+        if (~is_pattern && counter==`WINDOW_SZ-1) begin // Pattern is missing
+          in_frame = 0;
+          next = no_sync;
+        end
+        else begin
+          if (~is_pattern && (counter+1)%`OUT_SZ==0 && counter<`WINDOW_SZ-`PATTERN_SZ) data_valid = 1; // Positive routine function
+          else if (is_pattern && counter!=`WINDOW_SZ-1) begin // Early pattern
+            in_frame = 0;
+            next = ptrn1;
+            reset_cntr = 1;
+          end
+        end
       end
     endcase
   end
